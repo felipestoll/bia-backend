@@ -1,13 +1,13 @@
 # orchestrator.py
 from datetime import datetime, timedelta
-from ml_engine import MLEngine
+# A importação do MLEngine e do db pressupõe que eles estão na mesma pasta
+from ml_engine import MLEngine 
 from firebase_admin_config import db 
 from pytz import timezone
 from typing import List, Dict
 import asyncio
 import logging
 
-# Configuração de logs para rastrear a execução
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('Orchestrator')
 
@@ -26,7 +26,6 @@ class Orchestrator:
         """
         logger.info(f"Iniciando orquestração para {user_id}, tipo: {vital_type}")
         
-        current_time = datetime.now(SAO_PAULO_TZ).isoformat()
         current_value = new_data.get('value', 0.0)
         
         # 1. Análise Temporal & Regras Condicionais Simples
@@ -54,10 +53,10 @@ class Orchestrator:
         insights_generated.extend(self._process_regression_insights(user_id, vital_type, regression_trend))
 
         # 4. Geração de Insights de Correlação (Exemplo)
+        # Se for um dado de sono, tenta correlacionar com HRV
         if vital_type == 'sleep':
-            # Tenta correlacionar sono com HRV (requer dados de HRV)
             hrv_data = await self._fetch_history_data(user_id, 'hrv', limit=30)
-            if hrv_data:
+            if hrv_data and len(history_data) >= 2:
                 correlation = ml_engine.pearson_correlation(history_data, 'value', hrv_data, 'value')
                 insights_generated.extend(self._process_correlation_insights(user_id, 'sleep_vs_hrv', correlation))
 
@@ -78,7 +77,6 @@ class Orchestrator:
 
     async def _fetch_history_data(self, user_id: str, vital_type: str, limit: int) -> List[Dict]:
         """Busca dados históricos de forma assíncrona."""
-        # Não precisa ser totalmente assíncrono aqui, mas simula a chamada de E/S
         history_docs = db.collection('vitals').document(user_id).collection(vital_type).order_by('timestamp', direction='DESCENDING').limit(limit).get()
         history_data = [
             {
@@ -90,18 +88,16 @@ class Orchestrator:
         return history_data
 
     def _process_anomaly_insights(self, user_id: str, vital_type: str, new_data: Dict, anomaly_results: List[Dict]) -> List[Dict]:
-        """Gera insights baseados em anomalias detectadas, focando no dado mais recente."""
+        """Gera insights baseados em anomalias detectadas."""
         insights = []
-        # Tenta converter o timestamp do novo dado para o mesmo formato usado no ML Engine
         new_data_ts_str = new_data.get('timestamp')
         
         for anomaly in anomaly_results:
-            # Assumindo que a comparação de timestamp como string seja suficiente para o dado mais recente
             if str(anomaly.get('timestamp')) == str(new_data_ts_str): 
                 insights.append({
                     "type": "alert",
                     "title": f"Anomalia de {vital_type.upper()} detectada",
-                    "description": f"Seu valor de {vital_type} ({new_data.get('value')}) foi um outlier (Z-score: {anomaly['z_score']:.2f}) em comparação com seu histórico recente.",
+                    "description": f"Seu valor de {vital_type} ({new_data.get('value')}) foi um outlier (Z-score: {anomaly['z_score']:.2f}).",
                     "code": f"{vital_type}_anomaly",
                     "metadata": anomaly
                 })
@@ -119,7 +115,7 @@ class Orchestrator:
                 insights.append({
                     "type": "trend",
                     "title": f"Tendência Semanal de {vital_type.capitalize()}",
-                    "description": f"Seu {vital_type} médio na última semana {trend_desc} em {abs(change):.1f}% em relação à semana anterior.",
+                    "description": f"Seu {vital_type} médio na última semana {trend_desc} em {abs(change):.1f}%.",
                     "code": f"{vital_type}_weekly_change",
                     "metadata": weekly_trend
                 })
@@ -128,7 +124,7 @@ class Orchestrator:
     def _process_regression_insights(self, user_id: str, vital_type: str, regression_trend: Dict) -> List[Dict]:
         """Gera insights baseados em tendência de longo prazo (regressão)."""
         insights = []
-        if regression_trend and abs(regression_trend.get('slope', 0)) > 0.01: # Limiar de inclinação para ser significativo
+        if regression_trend and abs(regression_trend.get('slope', 0)) > 0.01:
             slope = regression_trend['slope']
             trend_desc = "positiva" if slope > 0 else "negativa"
             
@@ -147,17 +143,16 @@ class Orchestrator:
         if correlation_result and correlation_result.get('correlation') is not None:
             corr = correlation_result['correlation']
             
-            if abs(corr) > 0.6 and correlation_result['p_value'] < 0.05: # Correlação forte e estatisticamente significativa
+            if abs(corr) > 0.6 and correlation_result['p_value'] < 0.05: # Correlação forte e significativa
                 strength = "fortemente correlacionados" if corr > 0 else "fortemente inversamente correlacionados"
                 insights.append({
                     "type": "correlation",
                     "title": f"Correlação Detectada: {correlation_name.replace('_', ' ').title()}",
-                    "description": f"Seus dados estão {strength} (Coeficiente: {corr:.2f}). Isso indica que a variação de um fator pode influenciar o outro.",
+                    "description": f"Seus dados estão {strength} (Coeficiente: {corr:.2f}).",
                     "code": f"strong_corr_{correlation_name}",
                     "metadata": correlation_result
                 })
         return insights
-
 
     def generate_critical_insight(self, user_id: str, message: str, insight_code: str):
         """Grava um insight crítico de regra condicional."""
@@ -175,8 +170,5 @@ class Orchestrator:
         insight['user_id'] = user_id
         insight['created_at'] = insight.get('created_at', datetime.now(SAO_PAULO_TZ).isoformat())
         
-        # Salva em insights para o usuário final
         db.collection('insights').document(user_id).collection('list').add(insight)
-        # Salva em ml_insights para auditoria e retreinamento (se necessário)
         db.collection('ml_insights').add(insight)
-        logger.info(f"Insight {insight['code']} salvo para o usuário {user_id}.")
